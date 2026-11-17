@@ -134,68 +134,108 @@ app.delete("/perfil_usuario/:id", async (req, res) => {
 // ==========================================
 
 // Obtener todos los periodos (o filtrados por usuario)
-app.get("/periodos", async (req, res) => {
-  const { usuario_id } = req.query;
+app.get("/periodos", verificarAutenticacion, async (req, res) => {
   try {
-    let query = "SELECT * FROM periodo_escolar";
-    let params = [];
-    if (usuario_id) {
-      query += " WHERE usuario_id = ?";
-      params.push(usuario_id);
-    }
-    const [rows] = await pool.query(query, params);
+    const [rows] = await pool.query(
+      "SELECT * FROM periodo_escolar WHERE usuario_id = ?",
+      [req.user.id],
+    );
+
     res.json(rows);
   } catch (error) {
     console.error("Error al obtener periodos:", error);
-    res.status(500).json({ error: "Error al obtener los periodos escolares" });
+    res.status(500).json({
+      error: "Error al obtener los periodos escolares",
+    });
   }
 });
 
-app.post("/periodos", async (req, res) => {
-  const { usuario_id, nombre, fecha_inicio, fecha_fin, estado } = req.body;
+app.post("/periodos", verificarAutenticacion, async (req, res) => {
+  const { nombre, fecha_inicio, fecha_fin, estado } = req.body;
+
   const nuevoId = crypto.randomUUID();
+  const usuario_id = req.user.id;
+
   try {
     const [result] = await pool.query(
-      "INSERT INTO periodo_escolar (id, usuario_id, nombre, fecha_inicio, fecha_fin, estado) VALUES (?, ?, ?, ?, ?, ?)",
-      [nuevoId, usuario_id, nombre, fecha_inicio, fecha_fin, estado],
+      `INSERT INTO periodo_escolar
+       (id, usuario_id, nombre, fecha_inicio, fecha_fin, estado)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        nuevoId,
+        usuario_id,
+        nombre,
+        fecha_inicio,
+        fecha_fin ?? null,
+        estado ?? "activo",
+      ],
     );
-    res
-      .status(201)
-      .json({ id: result.insertId, mensaje: "Periodo escolar creado" });
+
+    res.status(201).json({
+      id: nuevoId,
+      mensaje: "Periodo escolar creado",
+    });
   } catch (error) {
     console.error("Error al crear periodo:", error);
-    res.status(500).json({ error: "Error al crear el periodo escolar" });
+    res.status(500).json({
+      error: "Error al crear el periodo escolar",
+    });
   }
 });
 
-app.put("/periodos/:id", async (req, res) => {
+app.put("/periodos/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
   const { nombre, fecha_inicio, fecha_fin, estado } = req.body;
+
   try {
     const [result] = await pool.query(
-      "UPDATE periodo_escolar SET nombre = ?, fecha_inicio = ?, fecha_fin = ?, estado = ? WHERE id = ?",
-      [nombre, fecha_inicio, fecha_fin, estado, id],
+      `UPDATE periodo_escolar
+       SET nombre = ?, fecha_inicio = ?, fecha_fin = ?, estado = ?
+       WHERE id = ? AND usuario_id = ?`,
+      [nombre, fecha_inicio, fecha_fin, estado, id, req.user.id],
     );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Periodo no encontrado" });
-    res.json({ mensaje: "Periodo actualizado correctamente" });
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Periodo no encontrado",
+      });
+    }
+
+    res.json({
+      mensaje: "Periodo actualizado correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al actualizar el periodo" });
+    console.error("Error al actualizar periodo:", error);
+    res.status(500).json({
+      error: "Error al actualizar el periodo",
+    });
   }
 });
 
-app.delete("/periodos/:id", async (req, res) => {
+app.delete("/periodos/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
   try {
     const [result] = await pool.query(
-      "DELETE FROM periodo_escolar WHERE id = ?",
-      [id],
+      `DELETE FROM periodo_escolar
+       WHERE id = ? AND usuario_id = ?`,
+      [id, req.user.id],
     );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Periodo no encontrado" });
-    res.json({ mensaje: "Periodo eliminado" });
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Periodo no encontrado",
+      });
+    }
+
+    res.json({
+      mensaje: "Periodo eliminado correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al eliminar el periodo" });
+    console.error("Error al eliminar periodo:", error);
+    res.status(500).json({
+      error: "Error al eliminar el periodo",
+    });
   }
 });
 
