@@ -30,36 +30,61 @@ app.get("/auth/me", verificarAutenticacion, (req, res) => {
 // ==========================================
 
 // GET: Obtener todos los perfiles
-app.get("/perfil_usuario", async (req, res) => {
+app.get("/perfil_usuario", verificarAutenticacion, async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM perfil_usuario");
-    res.json(rows);
+    const [rows] = await pool.query(
+      "SELECT * FROM perfil_usuario WHERE id = ?",
+      [req.user.id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        error: "No existe un perfil para este usuario",
+      });
+    }
+
+    res.json(rows[0]);
   } catch (error) {
-    console.error("Error en la consulta GET:", error);
-    res.status(500).json({ error: "Error al conectar con la base de datos" });
+    console.error("Error en GET perfil_usuario:", error);
+    res.status(500).json({
+      error: "Error al consultar el perfil",
+    });
   }
 });
 
 // POST: Crear un perfil
-app.post("/perfil_usuario", async (req, res) => {
-  const { nombre, correo } = req.body;
-  const nuevoId = crypto.randomUUID(); // Genera un UUID automático (ej: 'a1b2c3d4-...')
+app.post("/perfil_usuario", verificarAutenticacion, async (req, res) => {
+  const { nombre } = req.body;
+  const id = req.user.id;
+  const correo = req.user.email;
+
+  if (!nombre || !nombre.trim()) {
+    return res.status(400).json({
+      error: "El nombre es obligatorio",
+    });
+  }
 
   try {
     await pool.query(
-      "INSERT INTO perfil_usuario (id, nombre, correo) VALUES (?, ?, ?)",
-      [nuevoId, nombre, correo],
+      `INSERT INTO perfil_usuario (id, nombre, correo)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+       nombre = VALUES(nombre),
+       correo = VALUES(correo)`,
+      [id, nombre.trim(), correo],
     );
 
-    res.status(201).json({
-      id: nuevoId,
-      nombre,
+    res.status(200).json({
+      id,
+      nombre: nombre.trim(),
       correo,
-      mensaje: "Usuario creado con éxito",
+      mensaje: "Perfil sincronizado correctamente",
     });
   } catch (error) {
-    console.error("Error en POST:", error);
-    res.status(500).json({ error: "Error al crear el usuario" });
+    console.error("Error en POST perfil_usuario:", error);
+    res.status(500).json({
+      error: "Error al crear o actualizar el perfil",
+    });
   }
 });
 
