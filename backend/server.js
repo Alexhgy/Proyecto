@@ -243,29 +243,57 @@ app.delete("/periodos/:id", verificarAutenticacion, async (req, res) => {
 // MATERIA - Pruebas completadas
 // ==========================================
 
-app.get("/materias", async (req, res) => {
+app.get("/materias", verificarAutenticacion, async (req, res) => {
   const { periodo_id } = req.query;
+
   try {
-    let query = "SELECT * FROM materia";
-    let params = [];
+    let query = `
+      SELECT m.*
+      FROM materia m
+      INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+      WHERE p.usuario_id = ?
+    `;
+
+    const params = [req.user.id];
+
     if (periodo_id) {
-      query += " WHERE periodo_id = ?";
+      query += " AND m.periodo_id = ?";
       params.push(periodo_id);
     }
+
     const [rows] = await pool.query(query, params);
+
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: "Error al obtener las materias" });
+    console.error("Error al obtener materias:", error);
+    res.status(500).json({
+      error: "Error al obtener las materias",
+    });
   }
 });
 
-app.post("/materias", async (req, res) => {
+app.post("/materias", verificarAutenticacion, async (req, res) => {
   const { periodo_id, nombre, descripcion } = req.body;
-  const nuevoId = crypto.randomUUID(); // Genera un ID único automático
+  const nuevoId = crypto.randomUUID();
 
   try {
-    const [result] = await pool.query(
-      "INSERT INTO materia (id, periodo_id, nombre, descripcion) VALUES (?, ?, ?, ?)",
+    const [periodos] = await pool.query(
+      `SELECT id
+       FROM periodo_escolar
+       WHERE id = ? AND usuario_id = ?`,
+      [periodo_id, req.user.id],
+    );
+
+    if (periodos.length === 0) {
+      return res.status(404).json({
+        error: "Periodo no encontrado",
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO materia
+       (id, periodo_id, nombre, descripcion)
+       VALUES (?, ?, ?, ?)`,
       [nuevoId, periodo_id, nombre, descripcion],
     );
 
@@ -277,36 +305,76 @@ app.post("/materias", async (req, res) => {
       mensaje: "Materia creada con éxito",
     });
   } catch (error) {
-    console.error("Error detallado al crear la materia:", error); // Esto te mostrará el error real en la terminal
-    res.status(500).json({ error: error.message }); // Temporalmente puedes ver el mensaje para depurar
+    console.error("Error al crear materia:", error);
+    res.status(500).json({
+      error: "Error al crear la materia",
+    });
   }
 });
 
-app.put("/materias/:id", async (req, res) => {
+app.put("/materias/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
   const { nombre, descripcion } = req.body;
+
   try {
-    const [result] = await pool.query(
-      "UPDATE materia SET nombre = ?, descripcion = ? WHERE id = ?",
+    const [materias] = await pool.query(
+      `SELECT m.id
+       FROM materia m
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       WHERE m.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
+    );
+
+    if (materias.length === 0) {
+      return res.status(404).json({
+        error: "Materia no encontrada",
+      });
+    }
+
+    await pool.query(
+      `UPDATE materia
+       SET nombre = ?, descripcion = ?
+       WHERE id = ?`,
       [nombre, descripcion, id],
     );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Materia no encontrada" });
-    res.json({ mensaje: "Materia actualizada" });
+
+    res.json({
+      mensaje: "Materia actualizada correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al actualizar la materia" });
+    console.error("Error al actualizar materia:", error);
+    res.status(500).json({
+      error: "Error al actualizar la materia",
+    });
   }
 });
 
-app.delete("/materias/:id", async (req, res) => {
+app.delete("/materias/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
   try {
-    const [result] = await pool.query("DELETE FROM materia WHERE id = ?", [id]);
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Materia no encontrada" });
-    res.json({ mensaje: "Materia eliminada" });
+    const [result] = await pool.query(
+      `DELETE m
+       FROM materia m
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       WHERE m.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Materia no encontrada",
+      });
+    }
+
+    res.json({
+      mensaje: "Materia eliminada correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al eliminar la materia" });
+    console.error("Error al eliminar materia:", error);
+    res.status(500).json({
+      error: "Error al eliminar la materia",
+    });
   }
 });
 
