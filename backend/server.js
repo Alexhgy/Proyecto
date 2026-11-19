@@ -549,7 +549,7 @@ app.delete("/tareas/:id", verificarAutenticacion, async (req, res) => {
 });
 
 // ==========================================
-// 4. ARCHIVO ADJUNTO
+// ARCHIVO ADJUNTO - Pruebas completadas
 // ==========================================
 
 app.get("/archivos", verificarAutenticacion, async (req, res) => {
@@ -839,53 +839,142 @@ app.delete("/archivos/:id", verificarAutenticacion, async (req, res) => {
 // RECORDATORIO
 // ==========================================
 
-app.get("/recordatorios", async (req, res) => {
+app.get("/recordatorios", verificarAutenticacion, async (req, res) => {
   const { tarea_id } = req.query;
+
   try {
-    let query = "SELECT * FROM recordatorio";
-    let params = [];
+    let query = `
+      SELECT r.*
+      FROM recordatorio r
+      INNER JOIN tarea t ON r.tarea_id = t.id
+      INNER JOIN materia m ON t.materia_id = m.id
+      INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+      WHERE p.usuario_id = ?
+    `;
+
+    const params = [req.user.id];
+
     if (tarea_id) {
-      query += " WHERE tarea_id = ?";
+      query += " AND r.tarea_id = ?";
       params.push(tarea_id);
     }
+
+    query += " ORDER BY r.fecha_programada ASC";
+
     const [rows] = await pool.query(query, params);
+
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: "Error al obtener recordatorios" });
+    console.error("Error al obtener recordatorios:", error);
+
+    res.status(500).json({
+      error: "Error al obtener recordatorios",
+    });
   }
 });
 
-app.post("/recordatorios", async (req, res) => {
-  const { tarea_id, fecha_programada } = req.body;
+app.post("/recordatorios", verificarAutenticacion, async (req, res) => {
+  const tarea_id = req.body?.tarea_id;
+  const fecha_programada = req.body?.fecha_programada;
+
+  try {
+    // 1. Validar los datos recibidos
+    if (!tarea_id || !fecha_programada) {
+      return res.status(400).json({
+        error: "Se requiere tarea_id y fecha_programada",
+      });
+    }
+
+    if (isNaN(Date.parse(fecha_programada))) {
+      return res.status(400).json({
+        error: "La fecha programada no es válida",
+      });
+    }
+
+    // 2. Verificar que la tarea pertenezca al usuario
+    const [tareas] = await pool.query(
+      `SELECT t.id
+       FROM tarea t
+       INNER JOIN materia m ON t.materia_id = m.id
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       WHERE t.id = ? AND p.usuario_id = ?`,
+      [tarea_id, req.user.id],
+    );
+
+    if (tareas.length === 0) {
+      return res.status(404).json({
+        error: "Tarea no encontrada",
+      });
+    }
+
+    // 3. Generar ID e insertar recordatorio
+    const recordatorioId = crypto.randomUUID();
+
+    await pool.query(
+      `INSERT INTO recordatorio
+       (id, tarea_id, fecha_programada)
+       VALUES (?, ?, ?)`,
+      [recordatorioId, tarea_id, fecha_programada],
+    );
+
+    res.status(201).json({
+      id: recordatorioId,
+      tarea_id,
+      fecha_programada,
+      mensaje: "Recordatorio programado correctamente",
+    });
+  } catch (error) {
+    console.error("Error al crear recordatorio:");
+    console.error("Código:", error.code);
+    console.error("Mensaje:", error.message);
+    console.error("SQL:", error.sqlMessage);
+
+    if (error.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({
+        error: "Esta tarea ya tiene un recordatorio programado",
+      });
+    }
+
+    res.status(500).json({
+      error: "Error al crear el recordatorio",
+    });
+  }
+});
+
+app.delete("/recordatorios/:id", verificarAutenticacion, async (req, res) => {
+  const { id } = req.params;
+
   try {
     const [result] = await pool.query(
-      "INSERT INTO recordatorio (tarea_id, fecha_programada) VALUES (?, ?)",
-      [tarea_id, fecha_programada],
+      `DELETE r
+         FROM recordatorio r
+         INNER JOIN tarea t ON r.tarea_id = t.id
+         INNER JOIN materia m ON t.materia_id = m.id
+         INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+         WHERE r.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
     );
-    res
-      .status(201)
-      .json({ id: result.insertId, mensaje: "Recordatorio programado" });
-  } catch (error) {
-    res.status(500).json({ error: "Error al crear el recordatorio" });
-  }
-});
 
-app.delete("/recordatorios/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const [result] = await pool.query("DELETE FROM recordatorio WHERE id = ?", [
-      id,
-    ]);
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Recordatorio no encontrado" });
-    res.json({ mensaje: "Recordatorio eliminado" });
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Recordatorio no encontrado",
+      });
+    }
+
+    res.json({
+      mensaje: "Recordatorio eliminado correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al eliminar el recordatorio" });
+    console.error("Error al eliminar recordatorio:", error);
+
+    res.status(500).json({
+      error: "Error al eliminar el recordatorio",
+    });
   }
 });
 
 // ==========================================
-// 6. NOTIFICACION
+// NOTIFICACION
 // ==========================================
 
 app.get("/notificaciones", async (req, res) => {
