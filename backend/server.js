@@ -836,7 +836,7 @@ app.delete("/archivos/:id", verificarAutenticacion, async (req, res) => {
 });
 
 // ==========================================
-// RECORDATORIO
+// RECORDATORIO - Pruebas completadas - Falta enviarlo al correo
 // ==========================================
 
 app.get("/recordatorios", verificarAutenticacion, async (req, res) => {
@@ -974,67 +974,196 @@ app.delete("/recordatorios/:id", verificarAutenticacion, async (req, res) => {
 });
 
 // ==========================================
-// NOTIFICACION
+// NOTIFICACION - Pruebas completadas
 // ==========================================
 
-app.get("/notificaciones", async (req, res) => {
-  const { usuario_id } = req.query;
+app.get("/notificaciones", verificarAutenticacion, async (req, res) => {
+  const { leida } = req.query;
+
   try {
-    let query = "SELECT * FROM notificacion";
-    let params = [];
-    if (usuario_id) {
-      query += " WHERE usuario_id = ?";
-      params.push(usuario_id);
+    let query = `
+      SELECT *
+      FROM notificacion
+      WHERE usuario_id = ?
+    `;
+
+    const params = [req.user.id];
+
+    if (leida !== undefined) {
+      if (leida !== "0" && leida !== "1") {
+        return res.status(400).json({
+          error: "El filtro leida debe ser 0 o 1",
+        });
+      }
+
+      query += " AND leida = ?";
+      params.push(Number(leida));
     }
+
+    query += " ORDER BY creada_en DESC";
+
     const [rows] = await pool.query(query, params);
+
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: "Error al obtener notificaciones" });
+    console.error("Error al obtener notificaciones:", error);
+
+    res.status(500).json({
+      error: "Error al obtener las notificaciones",
+    });
   }
 });
 
-app.post("/notificaciones", async (req, res) => {
-  const { usuario_id, tarea_id, tipo, titulo, mensaje } = req.body;
+app.post("/notificaciones", verificarAutenticacion, async (req, res) => {
+  const { tarea_id, tipo, titulo, mensaje } = req.body || {};
+
   try {
-    const [result] = await pool.query(
-      "INSERT INTO notificacion (usuario_id, tarea_id, tipo, titulo, mensaje) VALUES (?, ?, ?, ?, ?)",
-      [usuario_id, tarea_id || null, tipo, titulo, mensaje],
+    // 1. Validar los campos obligatorios
+    if (!tipo || !titulo || !mensaje) {
+      return res.status(400).json({
+        error: "Se requieren tipo, titulo y mensaje",
+      });
+    }
+
+    if (!["recordatorio", "aviso"].includes(tipo)) {
+      return res.status(400).json({
+        error: "Tipo de notificación no válido",
+      });
+    }
+
+    if (
+      typeof titulo !== "string" ||
+      titulo.trim().length === 0 ||
+      titulo.length > 150
+    ) {
+      return res.status(400).json({
+        error: "El título debe tener entre 1 y 150 caracteres",
+      });
+    }
+
+    if (typeof mensaje !== "string" || mensaje.trim().length === 0) {
+      return res.status(400).json({
+        error: "El mensaje no puede estar vacío",
+      });
+    }
+
+    // 2. Verificar la propiedad de la tarea, si se proporcionó
+    if (tarea_id) {
+      const [tareas] = await pool.query(
+        `SELECT t.id
+         FROM tarea t
+         INNER JOIN materia m ON t.materia_id = m.id
+         INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+         WHERE t.id = ? AND p.usuario_id = ?`,
+        [tarea_id, req.user.id],
+      );
+
+      if (tareas.length === 0) {
+        return res.status(404).json({
+          error: "Tarea no encontrada",
+        });
+      }
+    }
+
+    // 3. Crear la notificación
+    const notificacionId = crypto.randomUUID();
+
+    await pool.query(
+      `INSERT INTO notificacion
+       (id, usuario_id, tarea_id, tipo, titulo, mensaje)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        notificacionId,
+        req.user.id,
+        tarea_id || null,
+        tipo,
+        titulo.trim(),
+        mensaje.trim(),
+      ],
     );
-    res
-      .status(201)
-      .json({ id: result.insertId, mensaje: "Notificación creada" });
+
+    res.status(201).json({
+      id: notificacionId,
+      mensaje: "Notificación creada correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al crear la notificación" });
+    console.error("Error al crear notificación:", error);
+
+    res.status(500).json({
+      error: "Error al crear la notificación",
+    });
   }
 });
 
 // Marcar notificación como leída
-app.patch("/notificaciones/:id/leer", async (req, res) => {
+app.patch(
+  "/notificaciones/:id/leida",
+  verificarAutenticacion,
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const [result] = await pool.query(
+        `UPDATE notificacion
+         SET leida = TRUE
+         WHERE id = ? AND usuario_id = ?`,
+        [id, req.user.id],
+      );
+
+      if (result.affectedRows === 0) {
+        // Comprobar si existe, pero ya estaba leída
+        const [rows] = await pool.query(
+          `SELECT id
+           FROM notificacion
+           WHERE id = ? AND usuario_id = ?`,
+          [id, req.user.id],
+        );
+
+        if (rows.length === 0) {
+          return res.status(404).json({
+            error: "Notificación no encontrada",
+          });
+        }
+      }
+
+      res.json({
+        mensaje: "Notificación marcada como leída",
+      });
+    } catch (error) {
+      console.error("Error al actualizar notificación:", error);
+
+      res.status(500).json({
+        error: "Error al marcar la notificación como leída",
+      });
+    }
+  },
+);
+
+app.delete("/notificaciones/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
   try {
     const [result] = await pool.query(
-      "UPDATE notificacion SET leida = 1 WHERE id = ?",
-      [id],
+      `DELETE FROM notificacion
+         WHERE id = ? AND usuario_id = ?`,
+      [id, req.user.id],
     );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Notificación no encontrada" });
-    res.json({ mensaje: "Notificación marcada como leída" });
-  } catch (error) {
-    res.status(500).json({ error: "Error al actualizar la notificación" });
-  }
-});
 
-app.delete("/notificaciones/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const [result] = await pool.query("DELETE FROM notificacion WHERE id = ?", [
-      id,
-    ]);
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Notificación no encontrada" });
-    res.json({ mensaje: "Notificación eliminada" });
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Notificación no encontrada",
+      });
+    }
+
+    res.json({
+      mensaje: "Notificación eliminada correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al eliminar la notificación" });
+    console.error("Error al eliminar notificación:", error);
+
+    res.status(500).json({
+      error: "Error al eliminar la notificación",
+    });
   }
 });
 
