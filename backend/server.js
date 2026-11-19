@@ -1,8 +1,13 @@
+require("dotenv").config();
+
 const express = require("express");
-const pool = require("./db");
 const cors = require("cors");
 const crypto = require("crypto");
+const pool = require("./db");
+
 const verificarAutenticacion = require("./middlewares/auth.middleware");
+const supabaseStorage = require("./config/supabaseStorage");
+const upload = require("./middlewares/upload.middleware");
 
 const app = express();
 const port = 3000;
@@ -547,51 +552,286 @@ app.delete("/tareas/:id", verificarAutenticacion, async (req, res) => {
 // 4. ARCHIVO ADJUNTO
 // ==========================================
 
-app.get("/archivos", async (req, res) => {
+app.get("/archivos", verificarAutenticacion, async (req, res) => {
   const { tarea_id } = req.query;
+
   try {
-    let query = "SELECT * FROM archivo_adjunto";
-    let params = [];
+    let query = `
+      SELECT a.*
+      FROM archivo_adjunto a
+      INNER JOIN tarea t ON a.tarea_id = t.id
+      INNER JOIN materia m ON t.materia_id = m.id
+      INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+      WHERE p.usuario_id = ?
+    `;
+
+    const params = [req.user.id];
+
     if (tarea_id) {
-      query += " WHERE tarea_id = ?";
+      query += " AND a.tarea_id = ?";
       params.push(tarea_id);
     }
+
     const [rows] = await pool.query(query, params);
+
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: "Error al obtener los archivos" });
+    console.error("Error al obtener archivos:", error);
+    res.status(500).json({
+      error: "Error al obtener los archivos",
+    });
   }
 });
 
-app.post("/archivos", async (req, res) => {
-  const { tarea_id, nombre_archivo, ruta_storage, tipo_mime, tamano_bytes } =
-    req.body;
+app.get("/archivos/:id/descargar", verificarAutenticacion, async (req, res) => {
+  const { id } = req.params;
+
   try {
-    const [result] = await pool.query(
-      "INSERT INTO archivo_adjunto (tarea_id, nombre_archivo, ruta_storage, tipo_mime, tamano_bytes) VALUES (?, ?, ?, ?, ?)",
-      [tarea_id, nombre_archivo, ruta_storage, tipo_mime, tamano_bytes],
+    // 1. Buscar el archivo y verificar que pertenezca al usuario
+    const [archivos] = await pool.query(
+      `SELECT a.id, a.nombre_archivo, a.ruta_storage, a.tipo_mime
+         FROM archivo_adjunto a
+         INNER JOIN tarea t ON a.tarea_id = t.id
+         INNER JOIN materia m ON t.materia_id = m.id
+         INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+         WHERE a.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
     );
-    res.status(201).json({
-      id: result.insertId,
-      mensaje: "Archivo adjuntado correctamente",
+
+    if (archivos.length === 0) {
+      return res.status(404).json({
+        error: "Archivo adjunto no encontrado",
+      });
+    }
+
+    const archivo = archivos[0];
+
+    // 2. Generar URL firmada con vigencia de 60 segundos
+    const { data, error } = await supabaseStorage.storage
+      .from("archivos-academicos")
+      .createSignedUrl(archivo.ruta_storage, 60, {
+        download: archivo.nombre_archivo,
+      });
+
+    if (error) {
+      console.error("Error al generar URL firmada:", error);
+
+      return res.status(500).json({
+        error: "No fue posible generar el enlace de descarga",
+      });
+    }
+
+    // 3. Devolver información y URL al frontend
+    res.json({
+      mensaje: "Enlace de descarga generado correctamente",
+      archivo: {
+        id: archivo.id,
+        nombre_archivo: archivo.nombre_archivo,
+        tipo_mime: archivo.tipo_mime,
+        url: data.signedUrl,
+        expira_en_segundos: 60,
+      },
     });
   } catch (error) {
-    res.status(500).json({ error: "Error al guardar el archivo adjunto" });
+    console.error("Error al generar enlace de descarga:", error);
+
+    res.status(500).json({
+      error: "Error al generar el enlace de descarga",
+    });
   }
 });
 
-app.delete("/archivos/:id", async (req, res) => {
+app.post(
+  "/archivos",
+  verificarAutenticacion,
+  (req, res, next) => {
+    upload.single("archivo")(req, res, (error) => {
+      if (error) {
+        if (error.code === "LIMIT_FILE_SIZE") {
+          return res.status(413).json({
+            error: "El archivo supera el límite de 5 MiB",
+          });
+        }
+
+        return res.status(400).json({
+          error: error.message || "Error al recibir el archivo",
+        });
+      }
+
+      next();
+    });
+  },
+  async (req, res) => {
+    const tarea_id = req.body?.tarea_id;
+
+    try {
+      // 1. Comprobar que se haya enviado un archivo
+      if (!req.file) {
+        return res.status(400).json({
+          error: "No se proporcionó ningún archivo",
+        });
+      }
+
+      if (!tarea_id) {
+        return res.status(400).json({
+          error: "Se requiere el ID de la tarea",
+        });
+      }
+
+      // 2. Comprobar que la tarea pertenezca al usuario autenticado
+      const [tareas] = await pool.query(
+        `SELECT t.id
+         FROM tarea t
+         INNER JOIN materia m ON t.materia_id = m.id
+         INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+         WHERE t.id = ? AND p.usuario_id = ?`,
+        [tarea_id, req.user.id],
+      );
+
+      if (tareas.length === 0) {
+        return res.status(404).json({
+          error: "Tarea no encontrada",
+        });
+      }
+
+      // 3. Generar identificadores y ruta del archivo
+      const archivoId = crypto.randomUUID();
+      const extension = require("path")
+        .extname(req.file.originalname)
+        .toLowerCase();
+
+      const rutaStorage = `${req.user.id}/${tarea_id}/${archivoId}${extension}`;
+
+      // 4. Subir archivo a Supabase Storage
+      const { error: errorStorage } = await supabaseStorage.storage
+        .from("archivos-academicos")
+        .upload(rutaStorage, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (errorStorage) {
+        console.error("Error al subir archivo:", errorStorage);
+
+        return res.status(500).json({
+          error: "No fue posible almacenar el archivo",
+        });
+      }
+
+      // 5. Registrar los metadatos en MySQL
+      try {
+        const nombreArchivo = require("path")
+          .basename(req.file.originalname)
+          .slice(0, 255);
+
+        await pool.query(
+          `INSERT INTO archivo_adjunto
+          (id, tarea_id, nombre_archivo, ruta_storage, tipo_mime, tamano_bytes)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            archivoId,
+            tarea_id,
+            nombreArchivo,
+            rutaStorage,
+            req.file.mimetype,
+            req.file.size,
+          ],
+        );
+      } catch (errorBD) {
+        // Si falla MySQL, eliminar el archivo de Storage
+        const { error: errorEliminacion } = await supabaseStorage.storage
+          .from("archivos-academicos")
+          .remove([rutaStorage]);
+
+        if (errorEliminacion) {
+          console.error(
+            "No se pudo limpiar el archivo de Storage:",
+            errorEliminacion,
+          );
+        }
+
+        throw errorBD;
+      }
+
+      // 6. Responder al cliente
+      res.status(201).json({
+        mensaje: "Archivo adjuntado correctamente",
+        archivo: {
+          id: archivoId,
+          tarea_id,
+          nombre_archivo: req.file.originalname,
+          tipo_mime: req.file.mimetype,
+          tamano_bytes: req.file.size,
+        },
+      });
+    } catch (error) {
+      console.error("Error al adjuntar archivo:", error);
+
+      res.status(500).json({
+        error: "Error al guardar el archivo adjunto",
+      });
+    }
+  },
+);
+
+app.delete("/archivos/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
   try {
+    // 1. Buscar el archivo y verificar su propietario
+    const [archivos] = await pool.query(
+      `SELECT a.id, a.ruta_storage
+       FROM archivo_adjunto a
+       INNER JOIN tarea t ON a.tarea_id = t.id
+       INNER JOIN materia m ON t.materia_id = m.id
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       WHERE a.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
+    );
+
+    if (archivos.length === 0) {
+      return res.status(404).json({
+        error: "Archivo adjunto no encontrado",
+      });
+    }
+
+    const rutaStorage = archivos[0].ruta_storage;
+
+    // 2. Eliminar el archivo de Supabase Storage
+    const { error: errorStorage } = await supabaseStorage.storage
+      .from("archivos-academicos")
+      .remove([rutaStorage]);
+
+    if (errorStorage) {
+      console.error("Error al eliminar de Storage:", errorStorage);
+
+      return res.status(500).json({
+        error: "No fue posible eliminar el archivo almacenado",
+      });
+    }
+
+    // 3. Eliminar el registro de MySQL
     const [result] = await pool.query(
       "DELETE FROM archivo_adjunto WHERE id = ?",
       [id],
     );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Archivo no encontrado" });
-    res.json({ mensaje: "Archivo adjunto eliminado" });
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "No se encontró el registro del archivo",
+      });
+    }
+
+    // 4. Responder al cliente
+    res.json({
+      mensaje: "Archivo adjunto eliminado correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al eliminar el archivo" });
+    console.error("Error al eliminar archivo:", error);
+
+    res.status(500).json({
+      error: "Error al eliminar el archivo adjunto",
+    });
   }
 });
 
