@@ -382,23 +382,37 @@ app.delete("/materias/:id", verificarAutenticacion, async (req, res) => {
 // TAREA - Pruebas completadas - Revisar horas limite en "fecha_limite"
 // ==========================================
 
-app.get("/tareas", async (req, res) => {
+app.get("/tareas", verificarAutenticacion, async (req, res) => {
   const { materia_id } = req.query;
+
   try {
-    let query = "SELECT * FROM tarea";
-    let params = [];
+    let query = `
+      SELECT t.*
+      FROM tarea t
+      INNER JOIN materia m ON t.materia_id = m.id
+      INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+      WHERE p.usuario_id = ?
+    `;
+
+    const params = [req.user.id];
+
     if (materia_id) {
-      query += " WHERE materia_id = ?";
+      query += " AND t.materia_id = ?";
       params.push(materia_id);
     }
+
     const [rows] = await pool.query(query, params);
+
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: "Error al obtener las tareas" });
+    console.error("Error al obtener tareas:", error);
+    res.status(500).json({
+      error: "Error al obtener las tareas",
+    });
   }
 });
 
-app.post("/tareas", async (req, res) => {
+app.post("/tareas", verificarAutenticacion, async (req, res) => {
   const {
     materia_id,
     nombre,
@@ -409,57 +423,123 @@ app.post("/tareas", async (req, res) => {
     estado_realizacion,
     estado_repaso,
   } = req.body;
+
   const nuevoId = crypto.randomUUID();
+
   try {
-    const [result] = await pool.query(
-      "INSERT INTO tarea (id, materia_id, nombre, descripcion, fecha_limite, hora_limite, prioridad, estado_realizacion, estado_repaso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [
-        nuevoId,
+    // Comprobar que la materia pertenece al usuario
+    const [materias] = await pool.query(
+      `SELECT m.id
+       FROM materia m
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       WHERE m.id = ? AND p.usuario_id = ?`,
+      [materia_id, req.user.id],
+    );
+
+    if (materias.length === 0) {
+      return res.status(404).json({
+        error: "Materia no encontrada",
+      });
+    }
+
+    // Crear la tarea
+    await pool.query(
+      `INSERT INTO tarea (
+        id,
         materia_id,
         nombre,
         descripcion,
         fecha_limite,
         hora_limite,
         prioridad,
-        estado_realizacion || "pendiente",
-        estado_repaso || "pendiente",
+        estado_realizacion,
+        estado_repaso
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        nuevoId,
+        materia_id,
+        nombre,
+        descripcion,
+        fecha_limite,
+        hora_limite ?? null,
+        prioridad ?? "media",
+        estado_realizacion ?? "pendiente",
+        estado_repaso ?? "pendiente",
       ],
     );
-    res
-      .status(201)
-      .json({ id: result.insertId, mensaje: "Tarea creada con éxito" });
+
+    res.status(201).json({
+      id: nuevoId,
+      mensaje: "Tarea creada con éxito",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al crear la tarea" });
+    console.error("Error al crear tarea:", error);
+    res.status(500).json({
+      error: "Error al crear la tarea",
+    });
   }
 });
 
 // Ruta específica para marcar tarea como completada
-app.patch("/tareas/:id/completar", async (req, res) => {
+app.patch("/tareas/:id/completar", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
   try {
     const [result] = await pool.query(
-      "UPDATE tarea SET estado_realizacion = 'completada', completada_en = NOW() WHERE id = ?",
-      [id],
+      `UPDATE tarea t
+         INNER JOIN materia m ON t.materia_id = m.id
+         INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+         SET
+           t.estado_realizacion = 'completada',
+           t.completada_en = NOW()
+         WHERE t.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
     );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Tarea no encontrada" });
-    res.json({ mensaje: "Tarea marcada como completada" });
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Tarea no encontrada",
+      });
+    }
+
+    res.json({
+      mensaje: "Tarea marcada como completada",
+    });
   } catch (error) {
-    res
-      .status(500)
-      .json({ error: "Error al actualizar el estado de la tarea" });
+    console.error("Error al completar tarea:", error);
+    res.status(500).json({
+      error: "Error al actualizar el estado de la tarea",
+    });
   }
 });
 
-app.delete("/tareas/:id", async (req, res) => {
+app.delete("/tareas/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
   try {
-    const [result] = await pool.query("DELETE FROM tarea WHERE id = ?", [id]);
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Tarea no encontrada" });
-    res.json({ mensaje: "Tarea eliminada" });
+    const [result] = await pool.query(
+      `DELETE t
+       FROM tarea t
+       INNER JOIN materia m ON t.materia_id = m.id
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       WHERE t.id = ? AND p.usuario_id = ?`,
+      [id, req.user.id],
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Tarea no encontrada",
+      });
+    }
+
+    res.json({
+      mensaje: "Tarea eliminada correctamente",
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error al eliminar la tarea" });
+    console.error("Error al eliminar tarea:", error);
+    res.status(500).json({
+      error: "Error al eliminar la tarea",
+    });
   }
 });
 
