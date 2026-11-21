@@ -12,6 +12,73 @@ const upload = require("./middlewares/upload.middleware");
 const app = express();
 const port = 3000;
 
+const calcularFechaProgramada = (fecha, hora) => {
+  const fechaValida = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fecha);
+
+  if (!fechaValida) {
+    throw new Error("La fecha límite debe tener formato YYYY-MM-DD");
+  }
+
+  const [, anio, mes, dia] = fechaValida;
+
+  // Comprobar que la fecha realmente exista.
+  const comprobacion = new Date(
+    Date.UTC(Number(anio), Number(mes) - 1, Number(dia)),
+  );
+
+  if (
+    comprobacion.getUTCFullYear() !== Number(anio) ||
+    comprobacion.getUTCMonth() !== Number(mes) - 1 ||
+    comprobacion.getUTCDate() !== Number(dia)
+  ) {
+    throw new Error("La fecha límite no es válida");
+  }
+
+  const horaEfectiva = hora || "23:59:00";
+
+  if (!/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(horaEfectiva)) {
+    throw new Error("La hora límite no es válida");
+  }
+
+  // Interpretar la fecha y hora como horario de Ciudad de México.
+  const horaCompleta =
+    horaEfectiva.length === 5 ? `${horaEfectiva}:00` : horaEfectiva;
+
+  const vencimiento = new Date(`${fecha}T${horaCompleta}-06:00`);
+
+  // Restar exactamente 24 horas.
+  const fechaRecordatorio = new Date(
+    vencimiento.getTime() - 24 * 60 * 60 * 1000,
+  );
+
+  // No programar recordatorios cuyo momento ya pasó.
+  if (fechaRecordatorio.getTime() <= Date.now()) {
+    return null;
+  }
+
+  // Convertir el instante calculado a fecha y hora local de CDMX.
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Mexico_City",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(fechaRecordatorio);
+
+  const valores = {};
+
+  for (const parte of partes) {
+    if (parte.type !== "literal") {
+      valores[parte.type] = parte.value;
+    }
+  }
+
+  return `${valores.year}-${valores.month}-${valores.day} ${valores.hour}:${valores.minute}:${valores.second}`;
+};
+
 app.use(cors());
 app.use(express.json());
 
@@ -431,9 +498,32 @@ app.post("/tareas", verificarAutenticacion, async (req, res) => {
 
   const nuevoId = crypto.randomUUID();
 
+  const estadoFinal = estado_realizacion ?? "pendiente";
+
+  // Calcular el recordatorio antes de iniciar la transacción.
+  let fechaProgramada = null;
+
+  if (estadoFinal === "pendiente") {
+    try {
+      fechaProgramada = calcularFechaProgramada(fecha_limite, hora_limite);
+    } catch (error) {
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+  }
+
+  let connection;
+  let transaccionIniciada = false;
+
   try {
-    // Comprobar que la materia pertenece al usuario
-    const [materias] = await pool.query(
+    connection = await pool.getConnection();
+
+    await connection.beginTransaction();
+    transaccionIniciada = true;
+
+    // Comprobar que la materia pertenece al usuario.
+    const [materias] = await connection.query(
       `SELECT m.id
        FROM materia m
        INNER JOIN periodo_escolar p ON m.periodo_id = p.id
@@ -442,13 +532,16 @@ app.post("/tareas", verificarAutenticacion, async (req, res) => {
     );
 
     if (materias.length === 0) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
       return res.status(404).json({
         error: "Materia no encontrada",
       });
     }
 
-    // Crear la tarea
-    await pool.query(
+    // Crear la tarea.
+    await connection.query(
       `INSERT INTO tarea (
         id,
         materia_id,
@@ -468,20 +561,49 @@ app.post("/tareas", verificarAutenticacion, async (req, res) => {
         fecha_limite,
         hora_limite ?? null,
         prioridad ?? "media",
-        estado_realizacion ?? "pendiente",
+        estadoFinal,
         estado_repaso ?? "pendiente",
       ],
     );
 
+    // Crear el recordatorio cuando corresponda.
+    if (fechaProgramada !== null) {
+      const recordatorioId = crypto.randomUUID();
+
+      await connection.query(
+        `INSERT INTO recordatorio (
+          id,
+          tarea_id,
+          fecha_programada
+        ) VALUES (?, ?, ?)`,
+        [recordatorioId, nuevoId, fechaProgramada],
+      );
+    }
+
+    // Confirmar ambas operaciones.
+    await connection.commit();
+    transaccionIniciada = false;
+
     res.status(201).json({
       id: nuevoId,
       mensaje: "Tarea creada con éxito",
+      recordatorio_creado: fechaProgramada !== null,
+      fecha_programada: fechaProgramada,
     });
   } catch (error) {
+    if (connection && transaccionIniciada) {
+      await connection.rollback();
+    }
+
     console.error("Error al crear tarea:", error);
+
     res.status(500).json({
       error: "Error al crear la tarea",
     });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 
