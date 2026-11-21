@@ -8,6 +8,7 @@ const pool = require("./db");
 const verificarAutenticacion = require("./middlewares/auth.middleware");
 const supabaseStorage = require("./config/supabaseStorage");
 const upload = require("./middlewares/upload.middleware");
+const iniciarRecordatorios = require("./jobs/recordatorios.job");
 
 const app = express();
 const port = 3000;
@@ -608,35 +609,67 @@ app.post("/tareas", verificarAutenticacion, async (req, res) => {
 });
 
 // Ruta específica para marcar tarea como completada
+
 app.patch("/tareas/:id/completar", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
 
+  let connection;
+  let transaccionIniciada = false;
+
   try {
-    const [result] = await pool.query(
+    connection = await pool.getConnection();
+
+    await connection.beginTransaction();
+    transaccionIniciada = true;
+
+    const [result] = await connection.query(
       `UPDATE tarea t
-         INNER JOIN materia m ON t.materia_id = m.id
-         INNER JOIN periodo_escolar p ON m.periodo_id = p.id
-         SET
-           t.estado_realizacion = 'completada',
-           t.completada_en = NOW()
-         WHERE t.id = ? AND p.usuario_id = ?`,
+       INNER JOIN materia m ON t.materia_id = m.id
+       INNER JOIN periodo_escolar p ON m.periodo_id = p.id
+       SET
+         t.estado_realizacion = 'completada',
+         t.completada_en = NOW()
+       WHERE t.id = ? AND p.usuario_id = ?`,
       [id, req.user.id],
     );
 
     if (result.affectedRows === 0) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
       return res.status(404).json({
         error: "Tarea no encontrada",
       });
     }
 
+    const [recordatoriosEliminados] = await connection.query(
+      `DELETE FROM recordatorio
+       WHERE tarea_id = ?
+       AND enviado_en IS NULL`,
+      [id],
+    );
+
+    await connection.commit();
+    transaccionIniciada = false;
+
     res.json({
       mensaje: "Tarea marcada como completada",
+      recordatorio_cancelado: recordatoriosEliminados.affectedRows > 0,
     });
   } catch (error) {
+    if (connection && transaccionIniciada) {
+      await connection.rollback();
+    }
+
     console.error("Error al completar tarea:", error);
+
     res.status(500).json({
       error: "Error al actualizar el estado de la tarea",
     });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 
@@ -1291,5 +1324,6 @@ app.delete("/notificaciones/:id", verificarAutenticacion, async (req, res) => {
 
 // Iniciar servidor
 app.listen(port, () => {
-  console.log(`Servidor corriendo en http://localhost:${port}`);
+  console.log(`Servidor ejecutándose en el puerto ${port}`);
+  iniciarRecordatorios();
 });
