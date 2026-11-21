@@ -608,10 +608,29 @@ app.post("/tareas", verificarAutenticacion, async (req, res) => {
   }
 });
 
-// Ruta específica para marcar tarea como completada
-
-app.patch("/tareas/:id/completar", verificarAutenticacion, async (req, res) => {
+app.patch("/tareas/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
+
+  const camposPermitidos = [
+    "nombre",
+    "descripcion",
+    "fecha_limite",
+    "hora_limite",
+    "prioridad",
+    "estado_realizacion",
+    "estado_repaso",
+  ];
+
+  const camposRecibidos = Object.keys(req.body);
+
+  if (
+    camposRecibidos.length === 0 ||
+    camposRecibidos.some((campo) => !camposPermitidos.includes(campo))
+  ) {
+    return res.status(400).json({
+      error: "No se proporcionaron campos válidos para actualizar",
+    });
+  }
 
   let connection;
   let transaccionIniciada = false;
@@ -622,18 +641,18 @@ app.patch("/tareas/:id/completar", verificarAutenticacion, async (req, res) => {
     await connection.beginTransaction();
     transaccionIniciada = true;
 
-    const [result] = await connection.query(
-      `UPDATE tarea t
+    // 1. Obtener la tarea y comprobar que pertenece al usuario.
+    const [tareas] = await connection.query(
+      `SELECT t.*
+       FROM tarea t
        INNER JOIN materia m ON t.materia_id = m.id
        INNER JOIN periodo_escolar p ON m.periodo_id = p.id
-       SET
-         t.estado_realizacion = 'completada',
-         t.completada_en = NOW()
-       WHERE t.id = ? AND p.usuario_id = ?`,
+       WHERE t.id = ? AND p.usuario_id = ?
+       FOR UPDATE`,
       [id, req.user.id],
     );
 
-    if (result.affectedRows === 0) {
+    if (tareas.length === 0) {
       await connection.rollback();
       transaccionIniciada = false;
 
@@ -642,29 +661,221 @@ app.patch("/tareas/:id/completar", verificarAutenticacion, async (req, res) => {
       });
     }
 
-    const [recordatoriosEliminados] = await connection.query(
-      `DELETE FROM recordatorio
+    const tareaActual = tareas[0];
+
+    // 2. Combinar los valores actuales con los recibidos.
+    const tareaNueva = {
+      nombre: tareaActual.nombre,
+      descripcion: tareaActual.descripcion,
+      fecha_limite: tareaActual.fecha_limite,
+      hora_limite: tareaActual.hora_limite,
+      prioridad: tareaActual.prioridad,
+      estado_realizacion: tareaActual.estado_realizacion,
+      estado_repaso: tareaActual.estado_repaso,
+    };
+
+    for (const campo of camposRecibidos) {
+      tareaNueva[campo] = req.body[campo];
+    }
+
+    // 3. Validar los datos.
+    if (
+      typeof tareaNueva.nombre !== "string" ||
+      tareaNueva.nombre.trim().length === 0 ||
+      tareaNueva.nombre.length > 150
+    ) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: "El nombre debe tener entre 1 y 150 caracteres",
+      });
+    }
+
+    const prioridades = ["baja", "media", "alta", "maxima"];
+    const estadosRealizacion = ["pendiente", "completada"];
+    const estadosRepaso = ["pendiente", "repasada"];
+
+    if (!prioridades.includes(tareaNueva.prioridad)) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: "Prioridad no válida",
+      });
+    }
+
+    if (!estadosRealizacion.includes(tareaNueva.estado_realizacion)) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: "Estado de realización no válido",
+      });
+    }
+
+    if (!estadosRepaso.includes(tareaNueva.estado_repaso)) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: "Estado de repaso no válido",
+      });
+    }
+
+    if (
+      tareaNueva.descripcion !== null &&
+      typeof tareaNueva.descripcion !== "string"
+    ) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: "La descripción debe ser texto o null",
+      });
+    }
+
+    if (
+      tareaNueva.hora_limite !== null &&
+      typeof tareaNueva.hora_limite !== "string"
+    ) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: "La hora límite debe ser una hora válida o null",
+      });
+    }
+
+    // 4. Calcular la nueva fecha del recordatorio.
+    let fechaProgramada = null;
+
+    try {
+      fechaProgramada = calcularFechaProgramada(
+        tareaNueva.fecha_limite,
+        tareaNueva.hora_limite,
+      );
+    } catch (error) {
+      await connection.rollback();
+      transaccionIniciada = false;
+
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+
+    // 5. Actualizar la tarea.
+    const completadaEn =
+      tareaNueva.estado_realizacion === "completada"
+        ? tareaActual.estado_realizacion === "completada"
+          ? tareaActual.completada_en
+          : new Date()
+        : null;
+
+    await connection.query(
+      `UPDATE tarea
+       SET
+         nombre = ?,
+         descripcion = ?,
+         fecha_limite = ?,
+         hora_limite = ?,
+         prioridad = ?,
+         estado_realizacion = ?,
+         estado_repaso = ?,
+         completada_en = ?
+       WHERE id = ?`,
+      [
+        tareaNueva.nombre.trim(),
+        tareaNueva.descripcion,
+        tareaNueva.fecha_limite,
+        tareaNueva.hora_limite,
+        tareaNueva.prioridad,
+        tareaNueva.estado_realizacion,
+        tareaNueva.estado_repaso,
+        completadaEn,
+        id,
+      ],
+    );
+
+    // 6. Consultar el recordatorio existente.
+    const [recordatorios] = await connection.query(
+      `SELECT id, enviado_en
+       FROM recordatorio
        WHERE tarea_id = ?
-       AND enviado_en IS NULL`,
+       FOR UPDATE`,
       [id],
     );
 
+    const recordatorio = recordatorios[0];
+
+    let accionRecordatorio = "sin_cambios";
+
+    if (tareaNueva.estado_realizacion === "completada") {
+      // Cancelar únicamente los recordatorios no enviados.
+      await connection.query(
+        `DELETE FROM recordatorio
+         WHERE tarea_id = ? AND enviado_en IS NULL`,
+        [id],
+      );
+
+      accionRecordatorio =
+        recordatorio && !recordatorio.enviado_en ? "cancelado" : "sin_cambios";
+    } else if (recordatorio?.enviado_en) {
+      // No generar un segundo correo si ya se envió uno.
+      accionRecordatorio = "ya_enviado";
+    } else if (fechaProgramada === null) {
+      // No quedan 24 horas de anticipación.
+      await connection.query(
+        `DELETE FROM recordatorio
+         WHERE tarea_id = ? AND enviado_en IS NULL`,
+        [id],
+      );
+
+      accionRecordatorio = "eliminado_por_fecha";
+    } else if (recordatorio) {
+      // Actualizar el recordatorio pendiente.
+      await connection.query(
+        `UPDATE recordatorio
+         SET fecha_programada = ?
+         WHERE id = ? AND enviado_en IS NULL`,
+        [fechaProgramada, recordatorio.id],
+      );
+
+      accionRecordatorio = "actualizado";
+    } else {
+      // Crear un recordatorio si todavía no existe.
+      const recordatorioId = crypto.randomUUID();
+
+      await connection.query(
+        `INSERT INTO recordatorio (
+          id,
+          tarea_id,
+          fecha_programada
+        ) VALUES (?, ?, ?)`,
+        [recordatorioId, id, fechaProgramada],
+      );
+
+      accionRecordatorio = "creado";
+    }
+
+    // 7. Confirmar todos los cambios.
     await connection.commit();
     transaccionIniciada = false;
 
     res.json({
-      mensaje: "Tarea marcada como completada",
-      recordatorio_cancelado: recordatoriosEliminados.affectedRows > 0,
+      mensaje: "Tarea actualizada correctamente",
+      recordatorio: accionRecordatorio,
+      fecha_programada: fechaProgramada,
     });
   } catch (error) {
     if (connection && transaccionIniciada) {
       await connection.rollback();
     }
 
-    console.error("Error al completar tarea:", error);
+    console.error("Error al actualizar tarea:", error);
 
     res.status(500).json({
-      error: "Error al actualizar el estado de la tarea",
+      error: "Error al actualizar la tarea",
     });
   } finally {
     if (connection) {
