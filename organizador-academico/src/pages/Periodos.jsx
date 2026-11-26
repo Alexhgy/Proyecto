@@ -220,8 +220,8 @@ function Periodos() {
   return (
     <AppLayout>
       <main className="periods-page">
-        <header className="page-header periods-header">
-          <div>
+        <header className="page-header">
+          <div className="page-header-content">
             <p className="page-eyebrow">ORGANIZACIÓN ACADÉMICA</p>
             <h1>Periodos escolares</h1>
             <p className="page-subtitle">

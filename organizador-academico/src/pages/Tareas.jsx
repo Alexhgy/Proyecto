@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import AppLayout from "../components/AppLayout";
 
 import {
@@ -16,6 +16,9 @@ import {
   descargarArchivo,
   eliminarArchivo,
 } from "../services/archivos.service";
+
+import { obtenerPeriodos } from "../services/periodos.service";
+import { obtenerMaterias } from "../services/materias.service";
 
 const EXTENSIONES_PERMITIDAS = [
   "pdf",
@@ -45,7 +48,11 @@ const PRIORIDADES = {
 };
 
 function Tareas() {
-  const { materia_id } = useParams();
+  const { periodo_id, materia_id } = useParams();
+  const navigate = useNavigate();
+
+  const [periodo, setPeriodo] = useState(null);
+  const [materia, setMateria] = useState(null);
 
   const [tareas, setTareas] = useState([]);
   const [archivosPorTarea, setArchivosPorTarea] = useState({});
@@ -132,9 +139,35 @@ function Tareas() {
     }
   };
 
+  const cargarContexto = async () => {
+    try {
+      const [periodos, materias] = await Promise.all([
+        obtenerPeriodos(),
+        obtenerMaterias(periodo_id),
+      ]);
+
+      const periodoActual = periodos.find(
+        (p) => String(p.id) === String(periodo_id),
+      );
+
+      const materiaActual = materias.find(
+        (m) => String(m.id) === String(materia_id),
+      );
+
+      setPeriodo(periodoActual || null);
+      setMateria(materiaActual || null);
+    } catch (error) {
+      console.error("Error al cargar el contexto académico:", error);
+      setError(
+        "No fue posible cargar la información del periodo y la materia.",
+      );
+    }
+  };
+
   useEffect(() => {
     cargarTareas();
-  }, [materia_id]);
+    cargarContexto();
+  }, [periodo_id, materia_id]);
 
   const ordenarTareas = (lista) => {
     const ordenPrioridad = {
@@ -448,13 +481,37 @@ function Tareas() {
   return (
     <AppLayout>
       <main className="tasks-page">
-        <header className="tasks-header">
-          <div>
-            <p className="tasks-eyebrow">ORGANIZACIÓN ACADÉMICA</p>
+        <header className="page-header">
+          <div className="page-header-content">
+            <p className="page-eyebrow">ORGANIZACIÓN ACADÉMICA</p>
+
             <h1>Tareas</h1>
-            <p className="tasks-subtitle">
+
+            <p className="page-subtitle">
               Administra tus entregas, prioridades y fechas límite.
             </p>
+
+            <div className="page-context">
+              <div>
+                <span className="page-context-label">PERIODO ESCOLAR</span>
+                <strong>{periodo?.nombre || "Cargando periodo..."}</strong>
+              </div>
+
+              <div>
+                <span className="page-context-label">MATERIA</span>
+                <strong>{materia?.nombre || "Cargando materia..."}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="page-header-actions">
+            <button
+              type="button"
+              className="page-back-button"
+              onClick={() => navigate(`/periodos/${periodo_id}/materias`)}
+            >
+              <span>←</span> Volver a materias
+            </button>
           </div>
         </header>
 

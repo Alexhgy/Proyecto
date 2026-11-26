@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { obtenerPeriodos } from "../services/periodos.service";
 
 import {
   obtenerMaterias,
@@ -29,6 +30,8 @@ function Materias() {
   const { periodo_id } = useParams();
   const navigate = useNavigate();
 
+  const [periodo, setPeriodo] = useState(null);
+
   const [materias, setMaterias] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [guardando, setGuardando] = useState(false);
@@ -51,8 +54,18 @@ function Materias() {
       setCargando(true);
       setError("");
 
-      const datos = await obtenerMaterias(periodo_id);
-      setMaterias(datos);
+      const [datosMaterias, periodos] = await Promise.all([
+        obtenerMaterias(periodo_id),
+        obtenerPeriodos(),
+      ]);
+
+      setMaterias(datosMaterias);
+
+      const periodoActual = periodos.find(
+        (p) => String(p.id) === String(periodo_id),
+      );
+
+      setPeriodo(periodoActual || null);
     } catch (error) {
       console.error("Error al cargar materias:", error);
       setError(error.message);
@@ -221,23 +234,32 @@ function Materias() {
   return (
     <AppLayout>
       <main className="subjects-page">
-        <header className="subjects-header">
-          <div>
-            <p className="subjects-eyebrow">ORGANIZACIÓN ACADÉMICA</p>
+        <header className="page-header">
+          <div className="page-header-content">
+            <p className="page-eyebrow">ORGANIZACIÓN ACADÉMICA</p>
             <h1>Mis materias</h1>
-            <p className="subjects-subtitle">
+            <p className="page-subtitle">
               Organiza tus asignaturas y mantén todas tus tareas en un solo
               lugar.
             </p>
+
+            <div className="page-context">
+              <div>
+                <span className="page-context-label">PERIODO ESCOLAR</span>
+                <strong>{periodo?.nombre || "Cargando periodo..."}</strong>
+              </div>
+            </div>
           </div>
 
-          <button
-            type="button"
-            className="subjects-back-button"
-            onClick={() => navigate("/periodos")}
-          >
-            ← Volver a periodos
-          </button>
+          <div className="page-header-actions">
+            <button
+              type="button"
+              className="page-back-button"
+              onClick={() => navigate("/periodos")}
+            >
+              <span>←</span> Volver a periodos
+            </button>
+          </div>
         </header>
 
         <section className="subjects-summary">
@@ -461,7 +483,9 @@ function Materias() {
                             type="button"
                             className="subject-tasks-button"
                             onClick={() =>
-                              navigate(`/materias/${materia.id}/tareas`)
+                              navigate(
+                                `/periodos/${periodo_id}/materias/${materia.id}/tareas`,
+                              )
                             }
                           >
                             Ver tareas <span>→</span>

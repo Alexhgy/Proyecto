@@ -29,7 +29,10 @@ function App() {
               path="/periodos/:periodo_id/materias"
               element={<Materias />}
             />
-            <Route path="/materias/:materia_id/tareas" element={<Tareas />} />
+            <Route
+              path="/periodos/:periodo_id/materias/:materia_id/tareas"
+              element={<Tareas />}
+            />{" "}
             <Route path="/notificaciones" element={<Notificaciones />} />
             <Route path="/perfil" element={<Perfil />} />
           </Route>
