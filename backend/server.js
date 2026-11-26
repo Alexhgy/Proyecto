@@ -161,6 +161,81 @@ app.post("/perfil_usuario", verificarAutenticacion, async (req, res) => {
   }
 });
 
+// GET: Consultar preferencias de recordatorios
+app.get(
+  "/perfil_usuario/preferencias",
+  verificarAutenticacion,
+  async (req, res) => {
+    try {
+      const [rows] = await pool.query(
+        "SELECT recibir_recordatorios FROM perfil_usuario WHERE id = ?",
+        [req.user.id],
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({
+          error: "No existe un perfil para este usuario",
+        });
+      }
+
+      res.json({
+        recibir_recordatorios: Boolean(rows[0].recibir_recordatorios),
+      });
+    } catch (error) {
+      console.error("Error al consultar preferencias:", error);
+      res.status(500).json({
+        error: "Error al consultar las preferencias",
+      });
+    }
+  },
+);
+
+// PATCH: Actualizar preferencia de recordatorios
+app.patch(
+  "/perfil_usuario/preferencias",
+  verificarAutenticacion,
+  async (req, res) => {
+    const { recibir_recordatorios } = req.body;
+
+    if (typeof recibir_recordatorios !== "boolean") {
+      return res.status(400).json({
+        error: "El valor de recibir_recordatorios debe ser booleano",
+      });
+    }
+
+    try {
+      const [result] = await pool.query(
+        "UPDATE perfil_usuario SET recibir_recordatorios = ? WHERE id = ?",
+        [recibir_recordatorios ? 1 : 0, req.user.id],
+      );
+
+      if (result.affectedRows === 0) {
+        // MySQL puede devolver 0 si el valor ya era el mismo.
+        const [rows] = await pool.query(
+          "SELECT id FROM perfil_usuario WHERE id = ?",
+          [req.user.id],
+        );
+
+        if (rows.length === 0) {
+          return res.status(404).json({
+            error: "No existe un perfil para este usuario",
+          });
+        }
+      }
+
+      res.json({
+        recibir_recordatorios,
+        mensaje: "Preferencia actualizada correctamente",
+      });
+    } catch (error) {
+      console.error("Error al actualizar preferencias:", error);
+      res.status(500).json({
+        error: "Error al actualizar las preferencias",
+      });
+    }
+  },
+);
+
 // PUT: Actualizar un perfil
 app.put("/perfil_usuario/:id", async (req, res) => {
   const { id } = req.params;
@@ -346,10 +421,27 @@ app.get("/materias", verificarAutenticacion, async (req, res) => {
 });
 
 app.post("/materias", verificarAutenticacion, async (req, res) => {
-  const { periodo_id, nombre, descripcion } = req.body;
+  const { periodo_id, nombre, descripcion, color } = req.body;
   const nuevoId = crypto.randomUUID();
 
   try {
+    // 1. Validar campos obligatorios.
+    if (!periodo_id || !nombre || !color) {
+      return res.status(400).json({
+        error: "Se requieren periodo_id, nombre y color",
+      });
+    }
+
+    // 2. Validar el formato del color.
+    const formatoColor = /^#[0-9A-Fa-f]{6}$/;
+
+    if (!formatoColor.test(color)) {
+      return res.status(400).json({
+        error: "El color debe tener un formato hexadecimal válido (#RRGGBB)",
+      });
+    }
+
+    // 3. Verificar que el periodo pertenezca al usuario.
     const [periodos] = await pool.query(
       `SELECT id
        FROM periodo_escolar
@@ -363,22 +455,25 @@ app.post("/materias", verificarAutenticacion, async (req, res) => {
       });
     }
 
+    // 4. Crear la materia.
     await pool.query(
       `INSERT INTO materia
-       (id, periodo_id, nombre, descripcion)
-       VALUES (?, ?, ?, ?)`,
-      [nuevoId, periodo_id, nombre, descripcion],
+       (id, periodo_id, nombre, descripcion, color)
+       VALUES (?, ?, ?, ?, ?)`,
+      [nuevoId, periodo_id, nombre, descripcion || null, color],
     );
 
     res.status(201).json({
       id: nuevoId,
       periodo_id,
       nombre,
-      descripcion,
+      descripcion: descripcion || null,
+      color,
       mensaje: "Materia creada con éxito",
     });
   } catch (error) {
     console.error("Error al crear materia:", error);
+
     res.status(500).json({
       error: "Error al crear la materia",
     });
@@ -387,9 +482,26 @@ app.post("/materias", verificarAutenticacion, async (req, res) => {
 
 app.put("/materias/:id", verificarAutenticacion, async (req, res) => {
   const { id } = req.params;
-  const { nombre, descripcion } = req.body;
+  const { nombre, descripcion, color } = req.body;
 
   try {
+    // 1. Validar campos obligatorios.
+    if (!nombre || !color) {
+      return res.status(400).json({
+        error: "Se requieren nombre y color",
+      });
+    }
+
+    // 2. Validar el formato del color.
+    const formatoColor = /^#[0-9A-Fa-f]{6}$/;
+
+    if (!formatoColor.test(color)) {
+      return res.status(400).json({
+        error: "El color debe tener un formato hexadecimal válido (#RRGGBB)",
+      });
+    }
+
+    // 3. Verificar que la materia pertenezca al usuario.
     const [materias] = await pool.query(
       `SELECT m.id
        FROM materia m
@@ -404,11 +516,12 @@ app.put("/materias/:id", verificarAutenticacion, async (req, res) => {
       });
     }
 
+    // 4. Actualizar la materia.
     await pool.query(
       `UPDATE materia
-       SET nombre = ?, descripcion = ?
+       SET nombre = ?, descripcion = ?, color = ?
        WHERE id = ?`,
-      [nombre, descripcion, id],
+      [nombre, descripcion || null, color, id],
     );
 
     res.json({
@@ -416,6 +529,7 @@ app.put("/materias/:id", verificarAutenticacion, async (req, res) => {
     });
   } catch (error) {
     console.error("Error al actualizar materia:", error);
+
     res.status(500).json({
       error: "Error al actualizar la materia",
     });
@@ -452,7 +566,7 @@ app.delete("/materias/:id", verificarAutenticacion, async (req, res) => {
 });
 
 // ==========================================
-// TAREA - Pruebas completadas - Revisar horas limite en "fecha_limite"
+// TAREA - Pruebas completadas
 // ==========================================
 
 app.get("/tareas", verificarAutenticacion, async (req, res) => {
@@ -1202,7 +1316,7 @@ app.delete("/archivos/:id", verificarAutenticacion, async (req, res) => {
 });
 
 // ==========================================
-// RECORDATORIO - Pruebas completadas - Falta enviarlo al correo
+// RECORDATORIO - Pruebas completadas
 // ==========================================
 
 app.get("/recordatorios", verificarAutenticacion, async (req, res) => {
@@ -1348,10 +1462,14 @@ app.get("/notificaciones", verificarAutenticacion, async (req, res) => {
 
   try {
     let query = `
-      SELECT *
-      FROM notificacion
-      WHERE usuario_id = ?
-    `;
+    SELECT
+    n.*,
+    t.nombre AS tarea_nombre,
+    t.materia_id
+FROM notificacion n
+LEFT JOIN tarea t ON n.tarea_id = t.id
+WHERE n.usuario_id = ?
+`;
 
     const params = [req.user.id];
 

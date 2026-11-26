@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const pool = require("../db");
 const transporter = require("../config/mailer");
 
@@ -29,53 +30,121 @@ const enviarRecordatoriosPendientes = async () => {
 
   const [recordatorios] = await pool.query(
     `SELECT
-       r.id AS recordatorio_id,
-       t.nombre AS tarea_nombre,
-       t.fecha_limite,
-       t.hora_limite,
-       pu.correo
+        r.id AS recordatorio_id,
+        r.notificacion_generada_en,
+        r.enviado_en,
+        t.id AS tarea_id,
+        t.nombre AS tarea_nombre,
+        t.fecha_limite,
+        t.hora_limite,
+        p.usuario_id,
+        pu.correo,
+        pu.recibir_recordatorios
      FROM recordatorio r
      INNER JOIN tarea t ON r.tarea_id = t.id
      INNER JOIN materia m ON t.materia_id = m.id
      INNER JOIN periodo_escolar p ON m.periodo_id = p.id
      INNER JOIN perfil_usuario pu ON p.usuario_id = pu.id
      WHERE r.fecha_programada <= ?
-       AND r.enviado_en IS NULL
        AND t.estado_realizacion = 'pendiente'
-       AND pu.correo IS NOT NULL
-       AND pu.correo <> ''`,
+       AND (
+         r.notificacion_generada_en IS NULL
+         OR (
+           pu.recibir_recordatorios = 1
+           AND r.enviado_en IS NULL
+         )
+       )`,
     [fechaActual],
   );
 
   for (const recordatorio of recordatorios) {
-    try {
-      const horaLimite = recordatorio.hora_limite || "23:59:00";
+    const horaLimite = recordatorio.hora_limite || "23:59:00";
 
-      await transporter.sendMail({
-        from: `"Gestor Académico" <${process.env.EMAIL_USER}>`,
-        to: recordatorio.correo,
-        subject: "Recordatorio de tarea pendiente",
-        text: `Tienes una tarea pendiente: ${recordatorio.tarea_nombre}.
+    // 1. Generar siempre la notificación interna.
+    if (!recordatorio.notificacion_generada_en) {
+      const conexion = await pool.getConnection();
+
+      try {
+        await conexion.beginTransaction();
+
+        const [resultado] = await conexion.query(
+          `UPDATE recordatorio
+           SET notificacion_generada_en = ?
+           WHERE id = ?
+             AND notificacion_generada_en IS NULL`,
+          [fechaActual, recordatorio.recordatorio_id],
+        );
+
+        if (resultado.affectedRows > 0) {
+          const notificacionId = crypto.randomUUID();
+
+          await conexion.query(
+            `INSERT INTO notificacion
+             (id, usuario_id, tarea_id, tipo, titulo, mensaje)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              notificacionId,
+              recordatorio.usuario_id,
+              recordatorio.tarea_id,
+              "recordatorio",
+              "Recordatorio de tarea pendiente",
+              `Tienes pendiente la tarea "${recordatorio.tarea_nombre}". Su fecha límite es ${recordatorio.fecha_limite} a las ${horaLimite}.`,
+            ],
+          );
+        }
+
+        await conexion.commit();
+
+        console.log(
+          `Notificación interna procesada: ${recordatorio.tarea_nombre}`,
+        );
+      } catch (error) {
+        await conexion.rollback();
+        console.error(
+          `Error al generar la notificación interna ${recordatorio.recordatorio_id}:`,
+          error,
+        );
+
+        continue;
+      } finally {
+        conexion.release();
+      }
+    }
+
+    // 2. Enviar el correo solamente si el usuario lo permite.
+    if (
+      Number(recordatorio.recibir_recordatorios) === 1 &&
+      !recordatorio.enviado_en &&
+      recordatorio.correo
+    ) {
+      try {
+        await transporter.sendMail({
+          from: `"Gestor Académico" <${process.env.EMAIL_USER}>`,
+          to: recordatorio.correo,
+          subject: "Recordatorio de tarea pendiente",
+          text: `Tienes una tarea pendiente: ${recordatorio.tarea_nombre}.
 
 Fecha límite: ${recordatorio.fecha_limite}
 Hora límite: ${horaLimite}
 
 Ingresa a tu Gestor Académico para consultar los detalles.`,
-      });
+        });
 
-      await pool.query(
-        `UPDATE recordatorio
-         SET enviado_en = NOW()
-         WHERE id = ? AND enviado_en IS NULL`,
-        [recordatorio.recordatorio_id],
-      );
+        await pool.query(
+          `UPDATE recordatorio
+           SET enviado_en = ?
+           WHERE id = ?
+             AND enviado_en IS NULL`,
+          [fechaActual, recordatorio.recordatorio_id],
+        );
 
-      console.log(`Recordatorio enviado: ${recordatorio.tarea_nombre}`);
-    } catch (error) {
-      console.error(
-        `Error al enviar el recordatorio ${recordatorio.recordatorio_id}:`,
-        error,
-      );
+        console.log(`Correo enviado: ${recordatorio.tarea_nombre}`);
+      } catch (error) {
+        console.error(
+          `Error al enviar el correo del recordatorio ${recordatorio.recordatorio_id}:`,
+          error,
+        );
+      }
     }
   }
 };
